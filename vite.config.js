@@ -6,7 +6,7 @@ export default defineConfig({
   server: {
     proxy: {
       '/kalshi-api': {
-        target: 'https://trading-api.kalshi.com',
+        target: 'https://api.elections.kalshi.com',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/kalshi-api/, ''),
         secure: true,
