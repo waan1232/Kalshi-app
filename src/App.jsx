@@ -468,31 +468,42 @@ function analyzeMarketReal(market, allOddsData) {
   let entry = mid;
   let executableEdge = 0;
 
-  // BUY YES: market ask is below true probability
+  // BUY YES: market ask is below true probability → buy cheap YES, sell near fair value
   if (yesAsk != null && yesAsk > 0 && yesAsk <= 0.92 && (fairProb - yesAsk) > 0.025) {
     play = "YES";
     entry = yesAsk;
     executableEdge = fairProb - yesAsk;
-    sellTarget = Math.min(0.95, fairProb - 0.01);
+    // Target: converge to fair value (exit just below to ensure fill)
+    sellTarget = Math.min(0.95, fairProb + executableEdge * 0.6);
     edgeScore = Math.min(100, Math.floor(executableEdge * 1000));
   }
-  // BUY NO: market bid is above true probability (YES is overpriced)
+  // BUY NO: market bid is above true probability → YES is overpriced, buy NO cheap
   else if (yesBid != null && yesBid > 0 && yesBid >= 0.08 && (yesBid - fairProb) > 0.025) {
     play = "NO";
-    entry = 1 - yesBid;
+    entry = 1 - yesBid; // NO ask = 1 - YES bid
     executableEdge = yesBid - fairProb;
-    sellTarget = Math.min(0.95, (1 - fairProb) - 0.01);
+    // Target: NO converges up as YES bid drops toward fair value
+    sellTarget = Math.min(0.95, (1 - fairProb) + executableEdge * 0.6);
     edgeScore = Math.min(100, Math.floor(executableEdge * 1000));
   }
+
+  const edgeLabel = edgeScore >= 68 ? "HIGH-CONFIDENCE" : edgeScore >= 45 ? "MODERATE" : "MARGINAL";
 
   return {
     fairProb, play, entry, sellTarget, edgeScore, executableEdge,
     matchedGame: `${matchedGame.home_team} vs ${matchedGame.away_team}`,
+    bookmaker: bookmaker.title,
+    representedTeam,
     reasoning: play === "FAIR"
-      ? `No executable edge. ${bookmaker.title} implies ${(fairProb * 100).toFixed(1)}% true probability for ${representedTeam}. Market is efficiently priced.`
-      : `Matched to ${matchedGame.home_team} vs ${matchedGame.away_team} via ${bookmaker.title}. True probability for ${representedTeam} is ${(fairProb * 100).toFixed(1)}%, creating actionable EV.`,
+      ? `No executable edge. ${bookmaker.title} implies ${(fairProb * 100).toFixed(1)}% true probability for ${representedTeam}. Kalshi mid is $${mid?.toFixed(2) ?? '--'}, within normal spread. Market is efficiently priced.`
+      : `${edgeLabel} EDGE detected. ${bookmaker.title} fair value for ${representedTeam}: ${(fairProb * 100).toFixed(1)}% ($${fairProb.toFixed(2)}). ` +
+        `Kalshi ${play === "YES" ? `ask ($${yesAsk?.toFixed(2)})` : `bid ($${yesBid?.toFixed(2)})`} is mispriced by ${(executableEdge * 100).toFixed(1)}¢. ` +
+        `Matched game: ${matchedGame.home_team} vs ${matchedGame.away_team}.`,
     sellConditions: play !== "FAIR"
-      ? `Enter at $${entry.toFixed(2)}. Hold until price converges toward true probability (~$${sellTarget.toFixed(2)}). Exit if game starts and spread widens unexpectedly.`
+      ? `BUY ${play} at $${entry.toFixed(2)} (true prob: $${fairProb.toFixed(2)}). ` +
+        `Price target: $${sellTarget.toFixed(2)} — exit as Kalshi converges to sportsbook fair value. ` +
+        `Expected gain: ~${((sellTarget - entry) * 100).toFixed(0)}¢ per contract. ` +
+        `Exit early if opposing book moves significantly or game-time approaches without convergence.`
       : null
   };
 }
@@ -562,56 +573,37 @@ export default function App() {
     setStatusMsg("Fetching live Kalshi markets...");
     addLog("[STEP 1] Fetching markets by sports series...", "ok");
 
-    // Target only the exact Kalshi series prefixes for each sport
-    // Much more reliable than dumping 6000 markets and filtering
-    // Known series prefixes (confirmed working)
-    const SERIES_PREFIXES = [
-      { prefix: 'KXNBAGAME',    cat: 'NBA'    },
-      { prefix: 'KXNCAAMBGAME', cat: 'NCAAB'  },
-      { prefix: 'KXNHLGAME',    cat: 'NHL'    },
-      { prefix: 'KXNFLGAME',    cat: 'NFL'    },
-      { prefix: 'KXMLBGAME',    cat: 'MLB'    },
-      { prefix: 'KXUFCFIGHT',   cat: 'UFC'    },
-      { prefix: 'KXMMAGAME',    cat: 'UFC'    },
-      { prefix: 'KXEPLGAME',    cat: 'Soccer' },
-      { prefix: 'KXSOCCERGAME', cat: 'Soccer' },
-      { prefix: 'KXBOXING',     cat: 'Boxing' }, // confirmed prefix
+    // Sports config: series-level tickers (primary) + fallback event-level prefixes
+    // Primary strategy uses the events endpoint with series_ticker → gets all nested markets
+    // Fallback uses the markets endpoint directly with various ticker guesses
+    const SPORTS_CONFIG = [
+      { series: ['KXNBA'],              eventPrefixes: ['KXNBAGAME'],                    cat: 'NBA'    },
+      { series: ['KXNCAAB','KXNCAAMB'], eventPrefixes: ['KXNCAAMBGAME','KXNCAABGAME'],   cat: 'NCAAB'  },
+      { series: ['KXNHL'],              eventPrefixes: ['KXNHLGAME'],                    cat: 'NHL'    },
+      { series: ['KXNFL'],              eventPrefixes: ['KXNFLGAME'],                    cat: 'NFL'    },
+      { series: ['KXMLB'],              eventPrefixes: ['KXMLBGAME'],                    cat: 'MLB'    },
+      { series: ['KXUFC','KXMMA'],      eventPrefixes: ['KXUFCFIGHT','KXMMAGAME'],       cat: 'UFC'    },
+      { series: ['KXEPL','KXSOCCER','KXUCL','KXMLS'],
+                                        eventPrefixes: ['KXEPLGAME','KXSOCCERGAME'],      cat: 'Soccer' },
+      { series: ['KXBOXING'],           eventPrefixes: ['KXBOXING','KXBOX'],             cat: 'Boxing' },
+      { series: ['KXATP','KXWTA','KXTENNIS'],
+                                        eventPrefixes: ['KXATPMATCH','KXWTAMATCH','KXATPCHALLENGERMATCH','KXWTACHALLENGERMATCH','KXIW'],
+                                                                                          cat: 'Tennis' },
     ];
 
     let markets = [];
+    const existingTickers = new Set();
 
-    for (const { prefix, cat } of SERIES_PREFIXES) {
-      try {
-        const url = `/kalshi-api/trade-api/v2/markets?status=open&limit=200&series_ticker=${prefix}`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (data.markets?.length) {
-          const tagged = data.markets.map(m => ({ ...m, _forcedCat: cat }));
-          markets = [...markets, ...tagged];
-          addLog(`[${prefix}] ${data.markets.length} markets`, "ok");
-        }
-      } catch (e) {
-        addLog(`[${prefix}] fetch failed: ${e.message}`, "err");
-      }
-      await new Promise(r => setTimeout(r, 350));
-    }
-
-    // Boxing + Tennis: use Kalshi's event search endpoint which supports text search
-    // and also try fetching by known event ticker patterns via cursor-paginated dump
-    const existingTickers = new Set(markets.map(m => m.ticker));
-    for (const { searches, cat } of [
-      { searches: ['boxing', 'fight', 'bout'], cat: 'Boxing' },
-      { searches: ['tennis', 'atp', 'wta', 'indian wells', 'open'], cat: 'Tennis' },
-    ]) {
+    for (const { series, eventPrefixes, cat } of SPORTS_CONFIG) {
       let found = [];
 
-      // Strategy 1: Kalshi events search with actual query param (each keyword separately)
-      for (const q of searches) {
+      // ── Strategy 1: events endpoint with series_ticker (most reliable) ──────
+      for (const s of series) {
+        if (found.length > 0) break; // stop as soon as one series returns data
         try {
-          const url = `/kalshi-api/trade-api/v2/events?status=open&limit=200&with_nested_markets=true&search=${encodeURIComponent(q)}`;
+          const url = `/kalshi-api/trade-api/v2/events?status=open&limit=200&series_ticker=${s}&with_nested_markets=true`;
           const res = await fetch(url);
-          if (!res.ok) continue;
+          if (!res.ok) { addLog(`[${s}] events HTTP ${res.status}`, 'warn'); continue; }
           const data = await res.json();
           for (const evt of (data.events || [])) {
             for (const m of (evt.markets || [])) {
@@ -621,46 +613,58 @@ export default function App() {
               }
             }
           }
-          if (data.events?.length) addLog(`[${cat} search="${q}"] ${data.events.length} events`, 'ok');
-        } catch(e) { /* ignore */ }
-        await new Promise(r => setTimeout(r, 200));
+          if ((data.events || []).length > 0) addLog(`[${s}] ${data.events.length} events → ${found.length} markets`, 'ok');
+        } catch (e) { addLog(`[${s}] events error: ${e.message}`, 'warn'); }
+        await new Promise(r => setTimeout(r, 250));
       }
 
-      // Strategy 2: direct markets fetch with series_ticker prefix guesses
-      const prefixGuesses = cat === 'Boxing'
-        ? ['KXBOX', 'KXBOUT', 'KXFIGHT']  // KXBOXING already in main series list
-        : ['KXATPCHALLENGERMATCH', 'KXWTACHALLENGERMATCH', // ← confirmed Challenger match tickers
-           'KXATPMATCH', 'KXWTAMATCH',                      // ← likely ATP/WTA main tour match tickers
-           'KXIWMEN', 'KXIWWOM', 'KXIW',
-           'KXTENNIS', 'KXATP', 'KXWTA', 'KXTENN',
-           'KXATPCHALLENGERITFMATCH', 'KXITFMATCH'];
-
-      for (const pfx of prefixGuesses) {
-        try {
-          const url = `/kalshi-api/trade-api/v2/markets?status=open&limit=200&series_ticker=${pfx}`;
-          const res = await fetch(url);
-          if (!res.ok) continue;
-          const data = await res.json();
-          if (data.markets?.length) {
-            for (const m of data.markets) {
+      // ── Strategy 2: markets endpoint with series_ticker ──────────────────────
+      if (found.length === 0) {
+        for (const s of series) {
+          try {
+            const url = `/kalshi-api/trade-api/v2/markets?status=open&limit=200&series_ticker=${s}`;
+            const res = await fetch(url);
+            if (!res.ok) continue;
+            const data = await res.json();
+            for (const m of (data.markets || [])) {
               if (!existingTickers.has(m.ticker)) {
                 found.push({ ...m, _forcedCat: cat });
                 existingTickers.add(m.ticker);
               }
             }
-            addLog(`[${pfx}] ${data.markets.length} markets found!`, "ok");
-          }
-        } catch(e) { /* ignore */ }
-        await new Promise(r => setTimeout(r, 150));
+            if ((data.markets || []).length > 0) addLog(`[${s}] ${data.markets.length} markets (mkts endpoint)`, 'ok');
+          } catch (e) { /* ignore */ }
+          await new Promise(r => setTimeout(r, 200));
+        }
       }
 
-      if (found.length) {
-        markets = [...markets, ...found];
-        addLog(`[${cat.toUpperCase()}] ${found.length} markets (sample: ${found[0]?.ticker})`, "ok");
-      } else {
-        addLog(`[${cat.toUpperCase()}] 0 markets — not on Kalshi today or unknown prefix`, "warn");
+      // ── Strategy 3: markets endpoint with event-level prefix guesses ─────────
+      if (found.length === 0) {
+        for (const pfx of eventPrefixes) {
+          try {
+            const url = `/kalshi-api/trade-api/v2/markets?status=open&limit=200&series_ticker=${pfx}`;
+            const res = await fetch(url);
+            if (!res.ok) continue;
+            const data = await res.json();
+            for (const m of (data.markets || [])) {
+              if (!existingTickers.has(m.ticker)) {
+                found.push({ ...m, _forcedCat: cat });
+                existingTickers.add(m.ticker);
+              }
+            }
+            if ((data.markets || []).length > 0) { addLog(`[${pfx}] ${data.markets.length} markets (prefix fallback)`, 'ok'); break; }
+          } catch (e) { /* ignore */ }
+          await new Promise(r => setTimeout(r, 150));
+        }
       }
-      await new Promise(r => setTimeout(r, 350));
+
+      if (found.length > 0) {
+        markets = [...markets, ...found];
+        addLog(`[${cat.toUpperCase()}] ✓ ${found.length} markets (sample: ${found[0]?.ticker})`, 'ok');
+      } else {
+        addLog(`[${cat.toUpperCase()}] 0 markets found — not on Kalshi today`, 'warn');
+      }
+      await new Promise(r => setTimeout(r, 300));
     }
 
     addLog(`[KALSHI] Fetched ${markets.length} raw sports markets.`, "ok");
@@ -696,16 +700,22 @@ export default function App() {
         const gameDate = new Date(Date.UTC(2000 + parseInt(dateMatch[1]), monthMap[dateMatch[2].toUpperCase()], parseInt(dateMatch[3])));
         const todayUTC = new Date(now);
         const todayStart = Date.UTC(todayUTC.getUTCFullYear(), todayUTC.getUTCMonth(), todayUTC.getUTCDate());
-        // Accept: up to 3 days ago (tennis matches can span days), today, and tomorrow
-        isRelevant = gameDate.getTime() >= todayStart - 3*24*60*60*1000 && gameDate.getTime() < todayStart + 2*24*60*60*1000;
+        // Accept: up to 3 days ago (tennis matches can span days), today, and next 3 days
+        isRelevant = gameDate.getTime() >= todayStart - 3*24*60*60*1000 && gameDate.getTime() < todayStart + 3*24*60*60*1000;
+      } else {
+        // No date in ticker — include if market is still open (close_time in future)
+        isRelevant = !m.close_time || new Date(m.close_time).getTime() > now - 2*60*60*1000;
       }
       if (!isRelevant) { debugReject.not_live++; return false; }
-      // Must have real trading volume
-      if (!m.volume_24h || m.volume_24h < 1) { debugReject.no_volume++; return false; }
-      // Must have active orderbook
+      // Volume check: skip only if truly dead (no volume AND empty book)
+      // Some freshly opened markets have 0 volume_24h but valid bids/asks
       const bid  = m.yes_bid   != null ? m.yes_bid   : 0;
       const ask  = m.yes_ask   != null ? m.yes_ask   : 100;
       const last = m.last_price != null ? m.last_price : 0;
+      const hasVolume = m.volume_24h > 0 || m.volume > 0;
+      const hasBook = !(bid === 0 && ask >= 99 && last === 0);
+      if (!hasVolume && !hasBook) { debugReject.no_volume++; return false; }
+      // Must have active orderbook
       if (bid === 0 && ask >= 99 && last === 0) { debugReject.empty_book++; return false; }
 
       debugReject.passed++;
@@ -911,21 +921,19 @@ export default function App() {
     if (!activeCats.includes(r.cat)) return false;
     if (timeWindow === 0) return true;
 
-    // Always use tickerDateMs — close_time is the settlement deadline (weeks out), not game time
-    const gameMs = r.tickerDateMs || null;
-    if (!gameMs) return false;
+    // Use tickerDateMs (game day) as primary; fall back to close_time for undated tickers
+    const gameMs = r.tickerDateMs || (r.closeTime ? new Date(r.closeTime).getTime() : null);
+    if (!gameMs) return true; // no timing info — always show
+
+    const daysDiff = (gameMs - nowMs) / (1000 * 60 * 60 * 24);
 
     if (timeWindow === -1) {
-      // LIVE NOW: game is happening today (within ±1 calendar day of now)
-      const gameDayStart = gameMs; // tickerDateMs = midnight UTC of game day
-      const daysDiff = (gameDayStart - nowMs) / (1000 * 60 * 60 * 24);
-      return daysDiff >= -1 && daysDiff <= 1;
+      // LIVE NOW: game is today or yesterday (already started) or tomorrow (pre-game)
+      return daysDiff >= -1.5 && daysDiff <= 1.5;
     }
 
-    // NEXT Xh: game day is today or within the window
-    const gameDayStart = gameMs;
-    const daysDiff = (gameDayStart - nowMs) / (1000 * 60 * 60 * 24);
-    return daysDiff >= -1 && daysDiff <= (timeWindow / 24) + 1;
+    // NEXT Xh window
+    return daysDiff >= -1.5 && daysDiff <= (timeWindow / 24) + 1;
   });
   const hotRows = visibleRows.filter(r => r.scanState === "done" && (r.play === "YES" || r.play === "NO"));
 
