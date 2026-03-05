@@ -564,7 +564,18 @@ export default function App() {
     try { localStorage.setItem('odds_api_key', e.target.value); } catch {}
   };
 
-  // Import PEM private key into Web Crypto for RSA-PSS signing
+  // Convert PKCS#1 RSA DER → PKCS#8 DER (Web Crypto only accepts PKCS#8)
+  const pkcs1ToPkcs8 = (pkcs1) => {
+    const encLen = (n) => n < 128 ? [n] : n < 256 ? [0x81, n] : [0x82, n >> 8, n & 0xff];
+    const seq = (bytes) => new Uint8Array([0x30, ...encLen(bytes.length), ...bytes]);
+    const oct = (bytes) => new Uint8Array([0x04, ...encLen(bytes.length), ...bytes]);
+    const version = [0x02, 0x01, 0x00];
+    const rsaOid  = [0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00];
+    const inner   = [...version, ...rsaOid, ...oct(pkcs1)];
+    return seq(inner).buffer;
+  };
+
+  // Import PEM private key into Web Crypto for RSA-PSS signing (handles PKCS#1 and PKCS#8)
   const loadKalshiKey = useCallback(async () => {
     const keyId = kalshiKeyId.trim();
     const pem = kalshiPem.trim();
@@ -573,8 +584,10 @@ export default function App() {
     try {
       const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s/g, '');
       const der = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+      const isPkcs1 = pem.includes('RSA PRIVATE KEY');
+      const keyBuffer = isPkcs1 ? pkcs1ToPkcs8(der) : der.buffer;
       const cryptoKey = await crypto.subtle.importKey(
-        'pkcs8', der.buffer,
+        'pkcs8', keyBuffer,
         { name: 'RSA-PSS', hash: 'SHA-256' },
         false, ['sign']
       );
