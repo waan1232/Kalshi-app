@@ -166,22 +166,6 @@ const STYLE = `
   .mpill { font-size: 8px; padding: 1px 5px; }
   .mpill.yes { color: var(--green); border: 1px solid var(--green-dim); }
   .mpill.no { color: var(--red); border: 1px solid rgba(255,69,96,0.4); }
-
-  .auth-bar { display: flex; align-items: center; gap: 8px; padding: 6px 18px;
-    border-bottom: 1px solid var(--border); background: var(--bg3); flex-shrink: 0; flex-wrap: wrap; }
-  .auth-input { font-family: var(--mono); font-size: 10px; background: var(--bg2);
-    border: 1px solid var(--border); color: var(--text-bright); padding: 5px 9px; width: 170px; outline: none; }
-  .auth-input:focus { border-color: var(--green-dim); }
-  .auth-btn { font-family: var(--orb); font-size: 9px; letter-spacing: 1px; padding: 5px 12px;
-    border: 1px solid var(--green-dim); background: transparent; color: var(--green-dim); cursor: pointer; }
-  .auth-btn:hover { background: var(--green-dark); }
-  .auth-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-  .auth-status { font-size: 9px; padding: 3px 8px; border: 1px solid; }
-  .auth-status.ok { color: var(--green); border-color: var(--green-dim); background: var(--green-dark); }
-  .auth-status.err { color: var(--red); border-color: rgba(255,69,96,0.4); }
-  .auth-label { font-size: 9px; color: var(--text-dim); letter-spacing: 1px; }
-  .auth-logout { font-size: 9px; color: var(--text-dim); background: none; border: none; cursor: pointer; padding: 2px 6px; }
-  .auth-logout:hover { color: var(--red); }
 `;
 
 const CAT_COLORS = {
@@ -540,13 +524,6 @@ export default function App() {
   const [apiKey, setApiKey] = useState(() => {
     try { return localStorage.getItem('odds_api_key') || ''; } catch { return ''; }
   });
-  const [kalshiToken, setKalshiToken] = useState(() => {
-    try { return localStorage.getItem('kalshi_token') || ''; } catch { return ''; }
-  });
-  const [kalshiEmail, setKalshiEmail] = useState('');
-  const [kalshiPassword, setKalshiPassword] = useState('');
-  const [kalshiLogging, setKalshiLogging] = useState(false);
-  const [kalshiAuthMsg, setKalshiAuthMsg] = useState('');
   const autoRef = useRef(null);
   const termRef = useRef(null);
   const scanRef = useRef(false);
@@ -556,39 +533,6 @@ export default function App() {
   const handleKeyChange = (e) => {
     setApiKey(e.target.value);
     try { localStorage.setItem('odds_api_key', e.target.value); } catch {}
-  };
-
-  const loginKalshi = useCallback(async () => {
-    if (!kalshiEmail.trim() || !kalshiPassword.trim()) {
-      setKalshiAuthMsg('Enter email and password.');
-      return;
-    }
-    setKalshiLogging(true);
-    setKalshiAuthMsg('');
-    try {
-      const res = await fetch('/kalshi-api/trade-api/v2/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: kalshiEmail.trim(), password: kalshiPassword }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || `HTTP ${res.status}`);
-      const token = data.token;
-      if (!token) throw new Error('No token in response');
-      setKalshiToken(token);
-      try { localStorage.setItem('kalshi_token', token); } catch {}
-      setKalshiPassword('');
-      setKalshiAuthMsg('ok');
-    } catch (e) {
-      setKalshiAuthMsg(e.message || 'Login failed');
-    }
-    setKalshiLogging(false);
-  }, [kalshiEmail, kalshiPassword]);
-
-  const logoutKalshi = () => {
-    setKalshiToken('');
-    setKalshiAuthMsg('');
-    try { localStorage.removeItem('kalshi_token'); } catch {}
   };
 
   const addDebug = useCallback((category, msg, data = null) => {
@@ -619,23 +563,12 @@ export default function App() {
 
     if (!apiKey.trim()) {
       addLog("[ERROR] Paste your Odds API Key in the top bar.", "err");
-      setStatusMsg("Missing Odds API Key.");
+      setStatusMsg("Missing API Key.");
       scanRef.current = false;
       setScanning(false);
       setProgress(0);
       return;
     }
-
-    if (!kalshiToken.trim()) {
-      addLog("[ERROR] Sign in to Kalshi first (use the auth bar below the header).", "err");
-      setStatusMsg("Not authenticated with Kalshi.");
-      scanRef.current = false;
-      setScanning(false);
-      setProgress(0);
-      return;
-    }
-
-    const kalshiHeaders = { 'Authorization': `Bearer ${kalshiToken.trim()}` };
 
     setStatusMsg("Fetching live Kalshi markets...");
     addLog("[STEP 1] Fetching markets by sports series...", "ok");
@@ -669,8 +602,7 @@ export default function App() {
         if (found.length > 0) break; // stop as soon as one series returns data
         try {
           const url = `/kalshi-api/trade-api/v2/events?status=open&limit=200&series_ticker=${s}&with_nested_markets=true`;
-          const res = await fetch(url, { headers: kalshiHeaders });
-          if (res.status === 401) { addLog(`[KALSHI AUTH] Token expired — please re-login.`, 'err'); scanRef.current = false; setScanning(false); setProgress(0); return; }
+          const res = await fetch(url);
           if (!res.ok) { addLog(`[${s}] events HTTP ${res.status}`, 'warn'); continue; }
           const data = await res.json();
           for (const evt of (data.events || [])) {
@@ -691,7 +623,7 @@ export default function App() {
         for (const s of series) {
           try {
             const url = `/kalshi-api/trade-api/v2/markets?status=open&limit=200&series_ticker=${s}`;
-            const res = await fetch(url, { headers: kalshiHeaders });
+            const res = await fetch(url);
             if (!res.ok) continue;
             const data = await res.json();
             for (const m of (data.markets || [])) {
@@ -711,7 +643,7 @@ export default function App() {
         for (const pfx of eventPrefixes) {
           try {
             const url = `/kalshi-api/trade-api/v2/markets?status=open&limit=200&series_ticker=${pfx}`;
-            const res = await fetch(url, { headers: kalshiHeaders });
+            const res = await fetch(url);
             if (!res.ok) continue;
             const data = await res.json();
             for (const m of (data.markets || [])) {
@@ -947,7 +879,7 @@ export default function App() {
     scanRef.current = false;
     setScanning(false);
     setTimeout(() => setProgress(0), 2000);
-  }, [apiKey, kalshiToken, addLog]);
+  }, [apiKey, addLog]);
 
   useEffect(() => {
     if (autoRef.current) clearInterval(autoRef.current);
@@ -1029,43 +961,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* ── Kalshi Auth Bar ───────────────────────────────────────────────── */}
-        <div className="auth-bar">
-          {kalshiToken ? (
-            <>
-              <span className="auth-status ok">✓ KALSHI CONNECTED</span>
-              <button className="auth-logout" onClick={logoutKalshi}>sign out</button>
-            </>
-          ) : (
-            <>
-              <span className="auth-label">KALSHI</span>
-              <input
-                type="email"
-                className="auth-input"
-                placeholder="Email"
-                value={kalshiEmail}
-                onChange={e => setKalshiEmail(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && loginKalshi()}
-                autoComplete="username"
-              />
-              <input
-                type="password"
-                className="auth-input"
-                placeholder="Password"
-                value={kalshiPassword}
-                onChange={e => setKalshiPassword(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && loginKalshi()}
-                autoComplete="current-password"
-              />
-              <button className="auth-btn" onClick={loginKalshi} disabled={kalshiLogging}>
-                {kalshiLogging ? 'CONNECTING...' : 'CONNECT'}
-              </button>
-              {kalshiAuthMsg && kalshiAuthMsg !== 'ok' && (
-                <span className="auth-status err">{kalshiAuthMsg}</span>
-              )}
-            </>
-          )}
-        </div>
 
         <div className="controls">
           <button className="scan-btn" onClick={runScan} disabled={scanning}>
