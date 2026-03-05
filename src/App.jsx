@@ -601,7 +601,7 @@ export default function App() {
       for (const s of series) {
         if (found.length > 0) break; // stop as soon as one series returns data
         try {
-          const url = `/kalshi-api/trade-api/v2/events?status=open&limit=200&series_ticker=${s}&with_nested_markets=true`;
+          const url = `https://api.elections.kalshi.com/trade-api/v2/events?status=open&limit=200&series_ticker=${s}&with_nested_markets=true`;
           const res = await fetch(url);
           if (!res.ok) { addLog(`[${s}] events HTTP ${res.status}`, 'warn'); continue; }
           const data = await res.json();
@@ -622,7 +622,7 @@ export default function App() {
       if (found.length === 0) {
         for (const s of series) {
           try {
-            const url = `/kalshi-api/trade-api/v2/markets?status=open&limit=200&series_ticker=${s}`;
+            const url = `https://api.elections.kalshi.com/trade-api/v2/markets?status=open&limit=200&series_ticker=${s}`;
             const res = await fetch(url);
             if (!res.ok) continue;
             const data = await res.json();
@@ -642,7 +642,7 @@ export default function App() {
       if (found.length === 0) {
         for (const pfx of eventPrefixes) {
           try {
-            const url = `/kalshi-api/trade-api/v2/markets?status=open&limit=200&series_ticker=${pfx}`;
+            const url = `https://api.elections.kalshi.com/trade-api/v2/markets?status=open&limit=200&series_ticker=${pfx}`;
             const res = await fetch(url);
             if (!res.ok) continue;
             const data = await res.json();
