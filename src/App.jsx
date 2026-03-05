@@ -567,11 +567,15 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: kalshiEmail.trim(), password: kalshiPassword }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || `HTTP ${res.status}`);
-      if (!data.token) throw new Error('No token returned');
-      setKalshiToken(data.token);
-      try { localStorage.setItem('kalshi_token', data.token); } catch {}
+      const text = await res.text();
+      console.log('[KALSHI LOGIN]', res.status, text);
+      let data;
+      try { data = JSON.parse(text); } catch { throw new Error(`Non-JSON response: ${text.slice(0, 120)}`); }
+      if (!res.ok) throw new Error(data.message || data.error || data.detail || `HTTP ${res.status}: ${text.slice(0, 120)}`);
+      const token = data.token || data.member_token || data.access_token || data.auth_token || (data.data && (data.data.token || data.data.access_token));
+      if (!token) throw new Error(`No token in response — keys: ${Object.keys(data).join(', ')}`);
+      setKalshiToken(token);
+      try { localStorage.setItem('kalshi_token', token); } catch {}
       setKalshiPassword('');
     } catch (e) { setKalshiErr(e.message || 'Login failed'); }
     setKalshiLogging(false);
