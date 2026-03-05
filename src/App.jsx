@@ -182,6 +182,10 @@ const STYLE = `
   .auth-label { font-size:9px; color:var(--text-dim); letter-spacing:1px; white-space:nowrap; }
   .auth-logout { font-size:9px; color:var(--text-dim); background:none; border:none; cursor:pointer; padding:2px 4px; }
   .auth-logout:hover { color:var(--red); }
+  .auth-pem { font-family:var(--mono); font-size:9px; background:var(--bg2);
+    border:1px solid var(--border); color:var(--text-dim); padding:4px 6px;
+    width:220px; height:48px; resize:none; outline:none; }
+  .auth-pem:focus { border-color:var(--green-dim); color:var(--text-bright); }
 `;
 
 const CAT_COLORS = {
@@ -540,13 +544,15 @@ export default function App() {
   const [apiKey, setApiKey] = useState(() => {
     try { return localStorage.getItem('odds_api_key') || ''; } catch { return ''; }
   });
-  const [kalshiToken, setKalshiToken] = useState(() => {
-    try { return localStorage.getItem('kalshi_token') || ''; } catch { return ''; }
+  const [kalshiKeyId, setKalshiKeyId] = useState(() => {
+    try { return localStorage.getItem('kalshi_key_id') || ''; } catch { return ''; }
   });
-  const [kalshiEmail, setKalshiEmail] = useState('');
-  const [kalshiPassword, setKalshiPassword] = useState('');
-  const [kalshiLogging, setKalshiLogging] = useState(false);
+  const [kalshiPem, setKalshiPem] = useState(() => {
+    try { return localStorage.getItem('kalshi_pem') || ''; } catch { return ''; }
+  });
+  const [kalshiKeyOk, setKalshiKeyOk] = useState(false);
   const [kalshiErr, setKalshiErr] = useState('');
+  const kalshiCryptoKey = useRef(null);
   const autoRef = useRef(null);
   const termRef = useRef(null);
   const scanRef = useRef(false);
@@ -558,33 +564,54 @@ export default function App() {
     try { localStorage.setItem('odds_api_key', e.target.value); } catch {}
   };
 
-  const loginKalshi = useCallback(async () => {
-    if (!kalshiEmail.trim() || !kalshiPassword.trim()) { setKalshiErr('Enter email and password.'); return; }
-    setKalshiLogging(true); setKalshiErr('');
+  // Import PEM private key into Web Crypto for RSA-PSS signing
+  const loadKalshiKey = useCallback(async () => {
+    const keyId = kalshiKeyId.trim();
+    const pem = kalshiPem.trim();
+    if (!keyId || !pem) { setKalshiErr('Enter both API Key ID and private key.'); return; }
+    setKalshiErr('');
     try {
-      const res = await fetch('/kalshi-api/trade-api/v2/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: kalshiEmail.trim(), password: kalshiPassword }),
-      });
-      const text = await res.text();
-      console.log('[KALSHI LOGIN]', res.status, text);
-      let data;
-      try { data = JSON.parse(text); } catch { throw new Error(`Non-JSON response: ${text.slice(0, 120)}`); }
-      if (!res.ok) throw new Error(data.message || data.error || data.detail || `HTTP ${res.status}: ${text.slice(0, 120)}`);
-      const token = data.token || data.member_token || data.access_token || data.auth_token || (data.data && (data.data.token || data.data.access_token));
-      if (!token) throw new Error(`No token in response — keys: ${Object.keys(data).join(', ')}`);
-      setKalshiToken(token);
-      try { localStorage.setItem('kalshi_token', token); } catch {}
-      setKalshiPassword('');
-    } catch (e) { setKalshiErr(e.message || 'Login failed'); }
-    setKalshiLogging(false);
-  }, [kalshiEmail, kalshiPassword]);
+      const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s/g, '');
+      const der = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+      const cryptoKey = await crypto.subtle.importKey(
+        'pkcs8', der.buffer,
+        { name: 'RSA-PSS', hash: 'SHA-256' },
+        false, ['sign']
+      );
+      kalshiCryptoKey.current = cryptoKey;
+      setKalshiKeyOk(true);
+      try { localStorage.setItem('kalshi_key_id', keyId); localStorage.setItem('kalshi_pem', pem); } catch {}
+    } catch (e) { setKalshiErr('Invalid key: ' + (e.message || e)); kalshiCryptoKey.current = null; setKalshiKeyOk(false); }
+  }, [kalshiKeyId, kalshiPem]);
 
   const logoutKalshi = () => {
-    setKalshiToken(''); setKalshiErr('');
-    try { localStorage.removeItem('kalshi_token'); } catch {}
+    setKalshiKeyOk(false); setKalshiErr(''); kalshiCryptoKey.current = null;
+    try { localStorage.removeItem('kalshi_key_id'); localStorage.removeItem('kalshi_pem'); } catch {}
+    setKalshiKeyId(''); setKalshiPem('');
   };
+
+  // Returns signed headers for a Kalshi request (method + Kalshi path, no /kalshi-api prefix)
+  const kalshiHeaders = useCallback(async (method, kalshiPath) => {
+    if (!kalshiCryptoKey.current || !kalshiKeyId.trim()) return {};
+    const ts = Date.now().toString();
+    const msg = ts + method.toUpperCase() + kalshiPath.split('?')[0];
+    const sig = await crypto.subtle.sign(
+      { name: 'RSA-PSS', saltLength: 32 },
+      kalshiCryptoKey.current,
+      new TextEncoder().encode(msg)
+    );
+    return {
+      'KALSHI-ACCESS-KEY': kalshiKeyId.trim(),
+      'KALSHI-ACCESS-SIGNATURE': btoa(String.fromCharCode(...new Uint8Array(sig))),
+      'KALSHI-ACCESS-TIMESTAMP': ts,
+    };
+  }, [kalshiKeyId]);
+
+  // Try to auto-load key from localStorage on mount
+  useEffect(() => {
+    if (kalshiKeyId.trim() && kalshiPem.trim()) loadKalshiKey();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const addDebug = useCallback((category, msg, data = null) => {
     const entry = {
@@ -618,13 +645,11 @@ export default function App() {
       scanRef.current = false; setScanning(false); setProgress(0); return;
     }
 
-    if (!kalshiToken.trim()) {
-      addLog("[ERROR] Sign in to Kalshi using the bar below the header.", "err");
-      setStatusMsg("Kalshi login required.");
+    if (!kalshiKeyOk || !kalshiCryptoKey.current) {
+      addLog("[ERROR] Connect your Kalshi API key in the bar below the header.", "err");
+      setStatusMsg("Kalshi API key required.");
       scanRef.current = false; setScanning(false); setProgress(0); return;
     }
-
-    const kHeaders = { 'Authorization': `Bearer ${kalshiToken.trim()}` };
 
     setStatusMsg("Fetching live Kalshi markets...");
     addLog("[STEP 1] Fetching markets by sports series...", "ok");
@@ -657,9 +682,10 @@ export default function App() {
       for (const s of series) {
         if (found.length > 0) break; // stop as soon as one series returns data
         try {
-          const url = `/kalshi-api/trade-api/v2/events?status=open&limit=200&series_ticker=${s}&with_nested_markets=true`;
-          const res = await fetch(url, { headers: kHeaders });
-          if (res.status === 401) { addLog('[KALSHI] Token expired — please sign in again.', 'err'); scanRef.current = false; setScanning(false); setProgress(0); return; }
+          const kalshiPath = `/trade-api/v2/events?status=open&limit=200&series_ticker=${s}&with_nested_markets=true`;
+          const url = `/kalshi-api${kalshiPath}`;
+          const res = await fetch(url, { headers: await kalshiHeaders('GET', kalshiPath) });
+          if (res.status === 401) { addLog('[KALSHI] API key rejected — check Key ID and PEM.', 'err'); scanRef.current = false; setScanning(false); setProgress(0); return; }
           if (!res.ok) { addLog(`[${s}] events HTTP ${res.status}`, 'warn'); continue; }
           const data = await res.json();
           for (const evt of (data.events || [])) {
@@ -679,8 +705,9 @@ export default function App() {
       if (found.length === 0) {
         for (const s of series) {
           try {
-            const url = `/kalshi-api/trade-api/v2/markets?status=open&limit=200&series_ticker=${s}`;
-            const res = await fetch(url, { headers: kHeaders });
+            const kalshiPath2 = `/trade-api/v2/markets?status=open&limit=200&series_ticker=${s}`;
+            const url = `/kalshi-api${kalshiPath2}`;
+            const res = await fetch(url, { headers: await kalshiHeaders('GET', kalshiPath2) });
             if (!res.ok) continue;
             const data = await res.json();
             for (const m of (data.markets || [])) {
@@ -699,8 +726,9 @@ export default function App() {
       if (found.length === 0) {
         for (const pfx of eventPrefixes) {
           try {
-            const url = `/kalshi-api/trade-api/v2/markets?status=open&limit=200&series_ticker=${pfx}`;
-            const res = await fetch(url, { headers: kHeaders });
+            const kalshiPath3 = `/trade-api/v2/markets?status=open&limit=200&series_ticker=${pfx}`;
+            const url = `/kalshi-api${kalshiPath3}`;
+            const res = await fetch(url, { headers: await kalshiHeaders('GET', kalshiPath3) });
             if (!res.ok) continue;
             const data = await res.json();
             for (const m of (data.markets || [])) {
@@ -936,7 +964,7 @@ export default function App() {
     scanRef.current = false;
     setScanning(false);
     setTimeout(() => setProgress(0), 2000);
-  }, [apiKey, kalshiToken, addLog]);
+  }, [apiKey, kalshiKeyOk, kalshiHeaders, addLog]);
 
   useEffect(() => {
     if (autoRef.current) clearInterval(autoRef.current);
@@ -1019,23 +1047,19 @@ export default function App() {
         </div>
 
         <div className="auth-bar">
-          {kalshiToken ? (
+          {kalshiKeyOk ? (
             <>
-              <span className="auth-connected">✓ KALSHI CONNECTED</span>
-              <button className="auth-logout" onClick={logoutKalshi}>sign out</button>
+              <span className="auth-connected">✓ KALSHI KEY LOADED</span>
+              <button className="auth-logout" onClick={logoutKalshi}>clear</button>
             </>
           ) : (
             <>
-              <span className="auth-label">KALSHI LOGIN</span>
-              <input type="email" className="auth-input" placeholder="Email"
-                value={kalshiEmail} onChange={e => setKalshiEmail(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && loginKalshi()} autoComplete="username" />
-              <input type="password" className="auth-input" placeholder="Password"
-                value={kalshiPassword} onChange={e => setKalshiPassword(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && loginKalshi()} autoComplete="current-password" />
-              <button className="auth-btn" onClick={loginKalshi} disabled={kalshiLogging}>
-                {kalshiLogging ? 'CONNECTING...' : 'CONNECT'}
-              </button>
+              <span className="auth-label">KALSHI API KEY</span>
+              <input className="auth-input" placeholder="Key ID (from kalshi.com/profile)"
+                value={kalshiKeyId} onChange={e => setKalshiKeyId(e.target.value)} />
+              <textarea className="auth-pem" placeholder={"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"}
+                value={kalshiPem} onChange={e => setKalshiPem(e.target.value)} />
+              <button className="auth-btn" onClick={loadKalshiKey}>LOAD</button>
               {kalshiErr && <span className="auth-err">{kalshiErr}</span>}
             </>
           )}
