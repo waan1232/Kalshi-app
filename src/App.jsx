@@ -571,6 +571,20 @@ export default function App() {
     }
 
     setStatusMsg("Fetching live Kalshi markets...");
+
+    // ── Connectivity / auth sanity check ──────────────────────────────────────
+    try {
+      const testRes = await fetch('https://api.elections.kalshi.com/trade-api/v2/series/KXHIGHNY');
+      addLog(`[KALSHI CONN] api.elections.kalshi.com → HTTP ${testRes.status}${testRes.ok ? ' ✓ public OK' : ' ✗ needs auth?'}`, testRes.ok ? 'ok' : 'err');
+      if (testRes.status === 401) {
+        addLog('[KALSHI AUTH] All endpoints require authentication. Add Kalshi login support.', 'err');
+        scanRef.current = false; setScanning(false); setProgress(0); return;
+      }
+    } catch (e) {
+      addLog(`[KALSHI CONN] Fetch error: ${e.message}`, 'err');
+      scanRef.current = false; setScanning(false); setProgress(0); return;
+    }
+
     addLog("[STEP 1] Fetching markets by sports series...", "ok");
 
     // Sports config: series-level tickers (primary) + fallback event-level prefixes
