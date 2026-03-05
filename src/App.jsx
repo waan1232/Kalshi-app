@@ -562,7 +562,7 @@ export default function App() {
     if (!kalshiEmail.trim() || !kalshiPassword.trim()) { setKalshiErr('Enter email and password.'); return; }
     setKalshiLogging(true); setKalshiErr('');
     try {
-      const res = await fetch('https://api.elections.kalshi.com/trade-api/v2/login', {
+      const res = await fetch('/kalshi-api/trade-api/v2/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: kalshiEmail.trim(), password: kalshiPassword }),
@@ -653,7 +653,7 @@ export default function App() {
       for (const s of series) {
         if (found.length > 0) break; // stop as soon as one series returns data
         try {
-          const url = `https://api.elections.kalshi.com/trade-api/v2/events?status=open&limit=200&series_ticker=${s}&with_nested_markets=true`;
+          const url = `/kalshi-api/trade-api/v2/events?status=open&limit=200&series_ticker=${s}&with_nested_markets=true`;
           const res = await fetch(url, { headers: kHeaders });
           if (res.status === 401) { addLog('[KALSHI] Token expired — please sign in again.', 'err'); scanRef.current = false; setScanning(false); setProgress(0); return; }
           if (!res.ok) { addLog(`[${s}] events HTTP ${res.status}`, 'warn'); continue; }
@@ -675,7 +675,7 @@ export default function App() {
       if (found.length === 0) {
         for (const s of series) {
           try {
-            const url = `https://api.elections.kalshi.com/trade-api/v2/markets?status=open&limit=200&series_ticker=${s}`;
+            const url = `/kalshi-api/trade-api/v2/markets?status=open&limit=200&series_ticker=${s}`;
             const res = await fetch(url, { headers: kHeaders });
             if (!res.ok) continue;
             const data = await res.json();
@@ -695,7 +695,7 @@ export default function App() {
       if (found.length === 0) {
         for (const pfx of eventPrefixes) {
           try {
-            const url = `https://api.elections.kalshi.com/trade-api/v2/markets?status=open&limit=200&series_ticker=${pfx}`;
+            const url = `/kalshi-api/trade-api/v2/markets?status=open&limit=200&series_ticker=${pfx}`;
             const res = await fetch(url, { headers: kHeaders });
             if (!res.ok) continue;
             const data = await res.json();
