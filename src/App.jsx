@@ -1033,9 +1033,9 @@ export default function App() {
       const daysDiff = (gMs - nowMs) / (1000 * 60 * 60 * 24);
       let passes;
       if (timeWindow === -1) {
-        passes = daysDiff >= -1.5 && daysDiff <= 0.5;
+        passes = daysDiff >= -1.2 && daysDiff <= 0.5;
       } else {
-        passes = daysDiff >= -1.5 && daysDiff <= (timeWindow / 24) + 1;
+        passes = daysDiff >= -1.2 && daysDiff <= (timeWindow / 24) + 1;
       }
       if (passes) { passed++; } else { failTime++; }
       if (samples.length < 5) samples.push({ ticker: r.ticker.slice(-16), days: daysDiff.toFixed(2), passes });
@@ -1054,12 +1054,12 @@ export default function App() {
     const daysDiff = (gameMs - nowMs) / (1000 * 60 * 60 * 24);
 
     if (timeWindow === -1) {
-      // LIVE NOW: ticker date is today or yesterday — not tomorrow's games
-      return daysDiff >= -1.5 && daysDiff <= 0.5;
+      // LIVE NOW: ticker date is today or within 28.8h back — excludes yesterday's finished games
+      return daysDiff >= -1.2 && daysDiff <= 0.5;
     }
 
     // NEXT Xh window
-    return daysDiff >= -1.5 && daysDiff <= (timeWindow / 24) + 1;
+    return daysDiff >= -1.2 && daysDiff <= (timeWindow / 24) + 1;
   });
   const hotRows = visibleRows.filter(r => r.scanState === "done" && (r.play === "YES" || r.play === "NO"));
 
