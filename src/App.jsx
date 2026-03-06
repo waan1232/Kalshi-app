@@ -254,8 +254,28 @@ function teamSimilarity(kalshiName, oddsName) {
   const k = kalshiName.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
   const o = oddsName.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
   
-  // Direct contains (full name is substring of other)
-  if (k.includes(o) || o.includes(k)) return 80;
+  if (k === o) return 100;
+
+  // Direct contains — guard against false positives where a short name is embedded
+  // inside a DIFFERENT team (e.g. "Kansas" in "arKANSAS", "Virginia" in "West Virginia",
+  // "Florida" in "Florida Gulf Coast", "Tennessee" in "Tennessee State").
+  if (k.includes(o) || o.includes(k)) {
+    const shorter = k.length <= o.length ? k : o;
+    const longer  = k.length <= o.length ? o : k;
+    // Require shorter to appear as whole word(s), not buried inside another word
+    const wholeWord = new RegExp(`(?:^| )${shorter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?= |$)`);
+    if (!wholeWord.test(longer)) return 0; // "kansas" inside "arkansas" → reject
+    const sWords = new Set(shorter.split(' '));
+    const extras = longer.split(' ').filter(w => !sWords.has(w));
+    // Geographic prefixes/suffixes → DIFFERENT team (West Virginia ≠ Virginia)
+    const GEO = new Set(['west','east','north','south','central','northern','southern',
+                         'eastern','western','coastal','upper','lower','mid','middle']);
+    // School-type qualifiers that change institution identity (Tennessee ≠ Tennessee State)
+    const MOD = new Set(['st','state','tech','am','at']);
+    // 2-letter words are state/school abbreviations (oh=Ohio, fl=Florida, nc=NC, etc.)
+    if (extras.some(w => GEO.has(w) || MOD.has(w) || w.length === 2)) return 0;
+    return 80;
+  }
   
   // Word overlap — but exclude generic geographic words that cause false matches
   // e.g. "South Carolina St" vs "South Carolina Upstate" should NOT match on "south"+"carolina"
@@ -324,8 +344,9 @@ function findMatchingOddsData(row, allOddsData) {
     if (validKeys.length > 0 && !validKeys.includes(game.api_sport)) return false;
     const gameStart = new Date(game.commence_time).getTime();
     if (gameDateMs) {
-      // Ticker date is midnight UTC — accept games within ±1 day
-      if (gameStart < gameDateMs - 24*60*60*1000) return false;
+      // Ticker date is midnight UTC — accept games starting up to 3h before that midnight
+      // (handles late-night games the day before) but not a full day back (avoids cross-day mismatches)
+      if (gameStart < gameDateMs - 3*60*60*1000) return false;
       if (gameStart > gameDateMs + 2*24*60*60*1000) return false;
     } else {
       if (gameStart > now + 14 * 24 * 60 * 60 * 1000) return false;
