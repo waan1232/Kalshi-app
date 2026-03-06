@@ -778,7 +778,7 @@ export default function App() {
     setProgress(20);
 
     // Filter: live games only (close_time within next 6h OR already past but within 2h), with volume
-    let debugReject = { combo: 0, prop_ticker: 0, prop_title: 0, not_live: 0, no_volume: 0, empty_book: 0, passed: 0 };
+    let debugReject = { combo: 0, prop_ticker: 0, prop_title: 0, expired: 0, futures: 0, not_live: 0, no_volume: 0, empty_book: 0, passed: 0 };
     const now = Date.now();
     const sportsMarkets = markets.filter(m => {
       const ticker = (m.ticker || "").toUpperCase();
@@ -789,6 +789,9 @@ export default function App() {
       // Exclude spreads, totals, player props
       if (/SPREAD|NBAPTS|NBAREB|NBAAST|NBASTL|NBABLK|NBA3PM|NBATOTAL|NHLTOTAL|NFLTOTAL/i.test(ticker)) { debugReject.prop_ticker++; return false; }
       if (/points|rebounds|assists|yards|goals|touchdowns|shots|over\b|under\b|spread|margin|\bby\b/i.test(title)) { debugReject.prop_title++; return false; }
+      // Exclude already-settled or expired markets (result is set when Kalshi has resolved the market)
+      if (m.result && m.result !== '') { debugReject.expired++; return false; }
+      if (m.status && /expired|settled|finalized|closed/i.test(m.status)) { debugReject.expired++; return false; }
       // LIVE ONLY: parse game date from ticker e.g. KXNBAGAME-26MAR05LALDEN-LAL → 26MAR05 → Mar 5 2026
       // Kalshi close_time is settlement deadline (2 weeks out), useless for game date — use ticker instead
       const dateMatch = ticker.match(/-(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d{2})/i);
@@ -801,8 +804,12 @@ export default function App() {
         // Accept: up to 3 days ago (tennis matches can span days), today, and next 3 days
         isRelevant = gameDate.getTime() >= todayStart - 3*24*60*60*1000 && gameDate.getTime() < todayStart + 3*24*60*60*1000;
       } else {
-        // No date in ticker — include if market is still open (close_time in future)
-        isRelevant = !m.close_time || new Date(m.close_time).getTime() > now - 2*60*60*1000;
+        // No date in ticker — only include if close_time is in the future AND within 30 days.
+        // This rejects season-long futures (close_time: 2028) and already-closed markets.
+        const closeMs = m.close_time ? new Date(m.close_time).getTime() : null;
+        if (!closeMs || closeMs <= now - 2*60*60*1000) { debugReject.expired++; return false; }
+        if (closeMs > now + 30*24*60*60*1000) { debugReject.futures++; return false; }
+        isRelevant = true;
       }
       if (!isRelevant) { debugReject.not_live++; return false; }
       // Volume check: skip only if truly dead (no volume AND empty book)
@@ -1021,7 +1028,7 @@ export default function App() {
 
     // Use tickerDateMs (game day) as primary; fall back to close_time for undated tickers
     const gameMs = r.tickerDateMs || (r.closeTime ? new Date(r.closeTime).getTime() : null);
-    if (!gameMs) return true; // no timing info — always show
+    if (!gameMs) return false; // no timing info — hide when filter is active
 
     const daysDiff = (gameMs - nowMs) / (1000 * 60 * 60 * 24);
 
@@ -1336,7 +1343,7 @@ export default function App() {
               )}
               {filterDebug?.samples?.length > 0 && (
                 <span style={{fontSize:9, color:'var(--text-dim)'}}>
-                  SAMPLES: {filterDebug.samples.map(s => `${s.ticker}(${s.mins}min ${s.passes?'✓':'✗'})`).join(' | ')}
+                  SAMPLES: {filterDebug.samples.map(s => `${s.ticker}(${s.days}d ${s.passes?'✓':'✗'})`).join(' | ')}
                 </span>
               )}
               <button onClick={() => setDebugLog([])} style={{marginLeft:'auto', fontSize:9, background:'none', border:'1px solid var(--border)', color:'var(--text-dim)', cursor:'pointer', padding:'2px 8px'}}>CLEAR</button>
