@@ -166,6 +166,26 @@ const STYLE = `
   .mpill { font-size: 8px; padding: 1px 5px; }
   .mpill.yes { color: var(--green); border: 1px solid var(--green-dim); }
   .mpill.no { color: var(--red); border: 1px solid rgba(255,69,96,0.4); }
+
+  .auth-bar { display:flex; align-items:center; gap:8px; padding:5px 18px;
+    border-bottom:1px solid var(--border); background:var(--bg3); flex-shrink:0; flex-wrap:wrap; }
+  .auth-input { font-family:var(--mono); font-size:10px; background:var(--bg2);
+    border:1px solid var(--border); color:var(--text-bright); padding:4px 8px; width:160px; outline:none; }
+  .auth-input:focus { border-color:var(--green-dim); }
+  .auth-btn { font-family:var(--orb); font-size:9px; letter-spacing:1px; padding:4px 12px;
+    border:1px solid var(--green-dim); background:transparent; color:var(--green-dim); cursor:pointer; }
+  .auth-btn:hover { background:var(--green-dark); }
+  .auth-btn:disabled { opacity:0.4; cursor:not-allowed; }
+  .auth-connected { font-size:9px; padding:3px 8px; color:var(--green);
+    border:1px solid var(--green-dim); background:var(--green-dark); }
+  .auth-err { font-size:9px; color:var(--red); }
+  .auth-label { font-size:9px; color:var(--text-dim); letter-spacing:1px; white-space:nowrap; }
+  .auth-logout { font-size:9px; color:var(--text-dim); background:none; border:none; cursor:pointer; padding:2px 4px; }
+  .auth-logout:hover { color:var(--red); }
+  .auth-pem { font-family:var(--mono); font-size:9px; background:var(--bg2);
+    border:1px solid var(--border); color:var(--text-dim); padding:4px 6px;
+    width:220px; height:48px; resize:none; outline:none; }
+  .auth-pem:focus { border-color:var(--green-dim); color:var(--text-bright); }
 `;
 
 const CAT_COLORS = {
@@ -234,8 +254,28 @@ function teamSimilarity(kalshiName, oddsName) {
   const k = kalshiName.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
   const o = oddsName.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
   
-  // Direct contains (full name is substring of other)
-  if (k.includes(o) || o.includes(k)) return 80;
+  if (k === o) return 100;
+
+  // Direct contains — guard against false positives where a short name is embedded
+  // inside a DIFFERENT team (e.g. "Kansas" in "arKANSAS", "Virginia" in "West Virginia",
+  // "Florida" in "Florida Gulf Coast", "Tennessee" in "Tennessee State").
+  if (k.includes(o) || o.includes(k)) {
+    const shorter = k.length <= o.length ? k : o;
+    const longer  = k.length <= o.length ? o : k;
+    // Require shorter to appear as whole word(s), not buried inside another word
+    const wholeWord = new RegExp(`(?:^| )${shorter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?= |$)`);
+    if (!wholeWord.test(longer)) return 0; // "kansas" inside "arkansas" → reject
+    const sWords = new Set(shorter.split(' '));
+    const extras = longer.split(' ').filter(w => !sWords.has(w));
+    // Geographic prefixes/suffixes → DIFFERENT team (West Virginia ≠ Virginia)
+    const GEO = new Set(['west','east','north','south','central','northern','southern',
+                         'eastern','western','coastal','upper','lower','mid','middle']);
+    // School-type qualifiers that change institution identity (Tennessee ≠ Tennessee State)
+    const MOD = new Set(['st','state','tech','am','at']);
+    // 2-letter words are state/school abbreviations (oh=Ohio, fl=Florida, nc=NC, etc.)
+    if (extras.some(w => GEO.has(w) || MOD.has(w) || w.length === 2)) return 0;
+    return 80;
+  }
   
   // Word overlap — but exclude generic geographic words that cause false matches
   // e.g. "South Carolina St" vs "South Carolina Upstate" should NOT match on "south"+"carolina"
@@ -304,8 +344,9 @@ function findMatchingOddsData(row, allOddsData) {
     if (validKeys.length > 0 && !validKeys.includes(game.api_sport)) return false;
     const gameStart = new Date(game.commence_time).getTime();
     if (gameDateMs) {
-      // Ticker date is midnight UTC — accept games within ±1 day
-      if (gameStart < gameDateMs - 24*60*60*1000) return false;
+      // Ticker date is midnight UTC — accept games starting up to 3h before that midnight
+      // (handles late-night games the day before) but not a full day back (avoids cross-day mismatches)
+      if (gameStart < gameDateMs - 3*60*60*1000) return false;
       if (gameStart > gameDateMs + 2*24*60*60*1000) return false;
     } else {
       if (gameStart > now + 14 * 24 * 60 * 60 * 1000) return false;
@@ -468,31 +509,42 @@ function analyzeMarketReal(market, allOddsData) {
   let entry = mid;
   let executableEdge = 0;
 
-  // BUY YES: market ask is below true probability
+  // BUY YES: market ask is below true probability → buy cheap YES, sell near fair value
   if (yesAsk != null && yesAsk > 0 && yesAsk <= 0.92 && (fairProb - yesAsk) > 0.025) {
     play = "YES";
     entry = yesAsk;
     executableEdge = fairProb - yesAsk;
-    sellTarget = Math.min(0.95, fairProb - 0.01);
+    // Target: converge to fair value (exit just below to ensure fill)
+    sellTarget = Math.min(0.95, fairProb + executableEdge * 0.6);
     edgeScore = Math.min(100, Math.floor(executableEdge * 1000));
   }
-  // BUY NO: market bid is above true probability (YES is overpriced)
+  // BUY NO: market bid is above true probability → YES is overpriced, buy NO cheap
   else if (yesBid != null && yesBid > 0 && yesBid >= 0.08 && (yesBid - fairProb) > 0.025) {
     play = "NO";
-    entry = 1 - yesBid;
+    entry = 1 - yesBid; // NO ask = 1 - YES bid
     executableEdge = yesBid - fairProb;
-    sellTarget = Math.min(0.95, (1 - fairProb) - 0.01);
+    // Target: NO converges up as YES bid drops toward fair value
+    sellTarget = Math.min(0.95, (1 - fairProb) + executableEdge * 0.6);
     edgeScore = Math.min(100, Math.floor(executableEdge * 1000));
   }
+
+  const edgeLabel = edgeScore >= 68 ? "HIGH-CONFIDENCE" : edgeScore >= 45 ? "MODERATE" : "MARGINAL";
 
   return {
     fairProb, play, entry, sellTarget, edgeScore, executableEdge,
     matchedGame: `${matchedGame.home_team} vs ${matchedGame.away_team}`,
+    bookmaker: bookmaker.title,
+    representedTeam,
     reasoning: play === "FAIR"
-      ? `No executable edge. ${bookmaker.title} implies ${(fairProb * 100).toFixed(1)}% true probability for ${representedTeam}. Market is efficiently priced.`
-      : `Matched to ${matchedGame.home_team} vs ${matchedGame.away_team} via ${bookmaker.title}. True probability for ${representedTeam} is ${(fairProb * 100).toFixed(1)}%, creating actionable EV.`,
+      ? `No executable edge. ${bookmaker.title} implies ${(fairProb * 100).toFixed(1)}% true probability for ${representedTeam}. Kalshi mid is $${mid?.toFixed(2) ?? '--'}, within normal spread. Market is efficiently priced.`
+      : `${edgeLabel} EDGE detected. ${bookmaker.title} fair value for ${representedTeam}: ${(fairProb * 100).toFixed(1)}% ($${fairProb.toFixed(2)}). ` +
+        `Kalshi ${play === "YES" ? `ask ($${yesAsk?.toFixed(2)})` : `bid ($${yesBid?.toFixed(2)})`} is mispriced by ${(executableEdge * 100).toFixed(1)}¢. ` +
+        `Matched game: ${matchedGame.home_team} vs ${matchedGame.away_team}.`,
     sellConditions: play !== "FAIR"
-      ? `Enter at $${entry.toFixed(2)}. Hold until price converges toward true probability (~$${sellTarget.toFixed(2)}). Exit if game starts and spread widens unexpectedly.`
+      ? `BUY ${play} at $${entry.toFixed(2)} (true prob: $${fairProb.toFixed(2)}). ` +
+        `Price target: $${sellTarget.toFixed(2)} — exit as Kalshi converges to sportsbook fair value. ` +
+        `Expected gain: ~${((sellTarget - entry) * 100).toFixed(0)}¢ per contract. ` +
+        `Exit early if opposing book moves significantly or game-time approaches without convergence.`
       : null
   };
 }
@@ -513,6 +565,15 @@ export default function App() {
   const [apiKey, setApiKey] = useState(() => {
     try { return localStorage.getItem('odds_api_key') || ''; } catch { return ''; }
   });
+  const [kalshiKeyId, setKalshiKeyId] = useState(() => {
+    try { return localStorage.getItem('kalshi_key_id') || ''; } catch { return ''; }
+  });
+  const [kalshiPem, setKalshiPem] = useState(() => {
+    try { return localStorage.getItem('kalshi_pem') || ''; } catch { return ''; }
+  });
+  const [kalshiKeyOk, setKalshiKeyOk] = useState(false);
+  const [kalshiErr, setKalshiErr] = useState('');
+  const kalshiCryptoKey = useRef(null);
   const autoRef = useRef(null);
   const termRef = useRef(null);
   const scanRef = useRef(false);
@@ -523,6 +584,68 @@ export default function App() {
     setApiKey(e.target.value);
     try { localStorage.setItem('odds_api_key', e.target.value); } catch {}
   };
+
+  // Convert PKCS#1 RSA DER → PKCS#8 DER (Web Crypto only accepts PKCS#8)
+  const pkcs1ToPkcs8 = (pkcs1) => {
+    const encLen = (n) => n < 128 ? [n] : n < 256 ? [0x81, n] : [0x82, n >> 8, n & 0xff];
+    const seq = (bytes) => new Uint8Array([0x30, ...encLen(bytes.length), ...bytes]);
+    const oct = (bytes) => new Uint8Array([0x04, ...encLen(bytes.length), ...bytes]);
+    const version = [0x02, 0x01, 0x00];
+    const rsaOid  = [0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00];
+    const inner   = [...version, ...rsaOid, ...oct(pkcs1)];
+    return seq(inner).buffer;
+  };
+
+  // Import PEM private key into Web Crypto for RSA-PSS signing (handles PKCS#1 and PKCS#8)
+  const loadKalshiKey = useCallback(async () => {
+    const keyId = kalshiKeyId.trim();
+    const pem = kalshiPem.trim();
+    if (!keyId || !pem) { setKalshiErr('Enter both API Key ID and private key.'); return; }
+    setKalshiErr('');
+    try {
+      const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s/g, '');
+      const der = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+      const isPkcs1 = pem.includes('RSA PRIVATE KEY');
+      const keyBuffer = isPkcs1 ? pkcs1ToPkcs8(der) : der.buffer;
+      const cryptoKey = await crypto.subtle.importKey(
+        'pkcs8', keyBuffer,
+        { name: 'RSA-PSS', hash: 'SHA-256' },
+        false, ['sign']
+      );
+      kalshiCryptoKey.current = cryptoKey;
+      setKalshiKeyOk(true);
+      try { localStorage.setItem('kalshi_key_id', keyId); localStorage.setItem('kalshi_pem', pem); } catch {}
+    } catch (e) { setKalshiErr('Invalid key: ' + (e.message || e)); kalshiCryptoKey.current = null; setKalshiKeyOk(false); }
+  }, [kalshiKeyId, kalshiPem]);
+
+  const logoutKalshi = () => {
+    setKalshiKeyOk(false); setKalshiErr(''); kalshiCryptoKey.current = null;
+    try { localStorage.removeItem('kalshi_key_id'); localStorage.removeItem('kalshi_pem'); } catch {}
+    setKalshiKeyId(''); setKalshiPem('');
+  };
+
+  // Returns signed headers for a Kalshi request (method + Kalshi path, no /kalshi-api prefix)
+  const kalshiHeaders = useCallback(async (method, kalshiPath) => {
+    if (!kalshiCryptoKey.current || !kalshiKeyId.trim()) return {};
+    const ts = Date.now().toString();
+    const msg = ts + method.toUpperCase() + kalshiPath.split('?')[0];
+    const sig = await crypto.subtle.sign(
+      { name: 'RSA-PSS', saltLength: 32 },
+      kalshiCryptoKey.current,
+      new TextEncoder().encode(msg)
+    );
+    return {
+      'KALSHI-ACCESS-KEY': kalshiKeyId.trim(),
+      'KALSHI-ACCESS-SIGNATURE': btoa(String.fromCharCode(...new Uint8Array(sig))),
+      'KALSHI-ACCESS-TIMESTAMP': ts,
+    };
+  }, [kalshiKeyId]);
+
+  // Try to auto-load key from localStorage on mount
+  useEffect(() => {
+    if (kalshiKeyId.trim() && kalshiPem.trim()) loadKalshiKey();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const addDebug = useCallback((category, msg, data = null) => {
     const entry = {
@@ -553,65 +676,51 @@ export default function App() {
     if (!apiKey.trim()) {
       addLog("[ERROR] Paste your Odds API Key in the top bar.", "err");
       setStatusMsg("Missing API Key.");
-      scanRef.current = false;
-      setScanning(false);
-      setProgress(0);
-      return;
+      scanRef.current = false; setScanning(false); setProgress(0); return;
+    }
+
+    if (!kalshiKeyOk || !kalshiCryptoKey.current) {
+      addLog("[ERROR] Connect your Kalshi API key in the bar below the header.", "err");
+      setStatusMsg("Kalshi API key required.");
+      scanRef.current = false; setScanning(false); setProgress(0); return;
     }
 
     setStatusMsg("Fetching live Kalshi markets...");
     addLog("[STEP 1] Fetching markets by sports series...", "ok");
 
-    // Target only the exact Kalshi series prefixes for each sport
-    // Much more reliable than dumping 6000 markets and filtering
-    // Known series prefixes (confirmed working)
-    const SERIES_PREFIXES = [
-      { prefix: 'KXNBAGAME',    cat: 'NBA'    },
-      { prefix: 'KXNCAAMBGAME', cat: 'NCAAB'  },
-      { prefix: 'KXNHLGAME',    cat: 'NHL'    },
-      { prefix: 'KXNFLGAME',    cat: 'NFL'    },
-      { prefix: 'KXMLBGAME',    cat: 'MLB'    },
-      { prefix: 'KXUFCFIGHT',   cat: 'UFC'    },
-      { prefix: 'KXMMAGAME',    cat: 'UFC'    },
-      { prefix: 'KXEPLGAME',    cat: 'Soccer' },
-      { prefix: 'KXSOCCERGAME', cat: 'Soccer' },
-      { prefix: 'KXBOXING',     cat: 'Boxing' }, // confirmed prefix
+    // Sports config: series-level tickers (primary) + fallback event-level prefixes
+    // Primary strategy uses the events endpoint with series_ticker → gets all nested markets
+    // Fallback uses the markets endpoint directly with various ticker guesses
+    const SPORTS_CONFIG = [
+      { series: ['KXNBA'],              eventPrefixes: ['KXNBAGAME'],                    cat: 'NBA'    },
+      { series: ['KXNCAAB','KXNCAAMB'], eventPrefixes: ['KXNCAAMBGAME','KXNCAABGAME'],   cat: 'NCAAB'  },
+      { series: ['KXNHL'],              eventPrefixes: ['KXNHLGAME'],                    cat: 'NHL'    },
+      { series: ['KXNFL'],              eventPrefixes: ['KXNFLGAME'],                    cat: 'NFL'    },
+      { series: ['KXMLB'],              eventPrefixes: ['KXMLBGAME'],                    cat: 'MLB'    },
+      { series: ['KXUFC','KXMMA'],      eventPrefixes: ['KXUFCFIGHT','KXMMAGAME'],       cat: 'UFC'    },
+      { series: ['KXEPL','KXSOCCER','KXUCL','KXMLS'],
+                                        eventPrefixes: ['KXEPLGAME','KXSOCCERGAME'],      cat: 'Soccer' },
+      { series: ['KXBOXING'],           eventPrefixes: ['KXBOXING','KXBOX'],             cat: 'Boxing' },
+      { series: ['KXATP','KXWTA','KXTENNIS'],
+                                        eventPrefixes: ['KXATPMATCH','KXWTAMATCH','KXATPCHALLENGERMATCH','KXWTACHALLENGERMATCH','KXIW'],
+                                                                                          cat: 'Tennis' },
     ];
 
     let markets = [];
+    const existingTickers = new Set();
 
-    for (const { prefix, cat } of SERIES_PREFIXES) {
-      try {
-        const url = `/kalshi-api/trade-api/v2/markets?status=open&limit=200&series_ticker=${prefix}`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (data.markets?.length) {
-          const tagged = data.markets.map(m => ({ ...m, _forcedCat: cat }));
-          markets = [...markets, ...tagged];
-          addLog(`[${prefix}] ${data.markets.length} markets`, "ok");
-        }
-      } catch (e) {
-        addLog(`[${prefix}] fetch failed: ${e.message}`, "err");
-      }
-      await new Promise(r => setTimeout(r, 350));
-    }
-
-    // Boxing + Tennis: use Kalshi's event search endpoint which supports text search
-    // and also try fetching by known event ticker patterns via cursor-paginated dump
-    const existingTickers = new Set(markets.map(m => m.ticker));
-    for (const { searches, cat } of [
-      { searches: ['boxing', 'fight', 'bout'], cat: 'Boxing' },
-      { searches: ['tennis', 'atp', 'wta', 'indian wells', 'open'], cat: 'Tennis' },
-    ]) {
+    for (const { series, eventPrefixes, cat } of SPORTS_CONFIG) {
       let found = [];
 
-      // Strategy 1: Kalshi events search with actual query param (each keyword separately)
-      for (const q of searches) {
+      // ── Strategy 1: events endpoint with series_ticker (most reliable) ──────
+      for (const s of series) {
+        if (found.length > 0) break; // stop as soon as one series returns data
         try {
-          const url = `/kalshi-api/trade-api/v2/events?status=open&limit=200&with_nested_markets=true&search=${encodeURIComponent(q)}`;
-          const res = await fetch(url);
-          if (!res.ok) continue;
+          const kalshiPath = `/trade-api/v2/events?status=open&limit=200&series_ticker=${s}&with_nested_markets=true`;
+          const url = `/kalshi-api${kalshiPath}`;
+          const res = await fetch(url, { headers: await kalshiHeaders('GET', kalshiPath) });
+          if (res.status === 401) { addLog('[KALSHI] API key rejected — check Key ID and PEM.', 'err'); scanRef.current = false; setScanning(false); setProgress(0); return; }
+          if (!res.ok) { addLog(`[${s}] events HTTP ${res.status}`, 'warn'); continue; }
           const data = await res.json();
           for (const evt of (data.events || [])) {
             for (const m of (evt.markets || [])) {
@@ -621,46 +730,60 @@ export default function App() {
               }
             }
           }
-          if (data.events?.length) addLog(`[${cat} search="${q}"] ${data.events.length} events`, 'ok');
-        } catch(e) { /* ignore */ }
-        await new Promise(r => setTimeout(r, 200));
+          if ((data.events || []).length > 0) addLog(`[${s}] ${data.events.length} events → ${found.length} markets`, 'ok');
+        } catch (e) { addLog(`[${s}] events error: ${e.message}`, 'warn'); }
+        await new Promise(r => setTimeout(r, 250));
       }
 
-      // Strategy 2: direct markets fetch with series_ticker prefix guesses
-      const prefixGuesses = cat === 'Boxing'
-        ? ['KXBOX', 'KXBOUT', 'KXFIGHT']  // KXBOXING already in main series list
-        : ['KXATPCHALLENGERMATCH', 'KXWTACHALLENGERMATCH', // ← confirmed Challenger match tickers
-           'KXATPMATCH', 'KXWTAMATCH',                      // ← likely ATP/WTA main tour match tickers
-           'KXIWMEN', 'KXIWWOM', 'KXIW',
-           'KXTENNIS', 'KXATP', 'KXWTA', 'KXTENN',
-           'KXATPCHALLENGERITFMATCH', 'KXITFMATCH'];
-
-      for (const pfx of prefixGuesses) {
-        try {
-          const url = `/kalshi-api/trade-api/v2/markets?status=open&limit=200&series_ticker=${pfx}`;
-          const res = await fetch(url);
-          if (!res.ok) continue;
-          const data = await res.json();
-          if (data.markets?.length) {
-            for (const m of data.markets) {
+      // ── Strategy 2: markets endpoint with series_ticker ──────────────────────
+      if (found.length === 0) {
+        for (const s of series) {
+          try {
+            const kalshiPath2 = `/trade-api/v2/markets?status=open&limit=200&series_ticker=${s}`;
+            const url = `/kalshi-api${kalshiPath2}`;
+            const res = await fetch(url, { headers: await kalshiHeaders('GET', kalshiPath2) });
+            if (!res.ok) continue;
+            const data = await res.json();
+            for (const m of (data.markets || [])) {
               if (!existingTickers.has(m.ticker)) {
                 found.push({ ...m, _forcedCat: cat });
                 existingTickers.add(m.ticker);
               }
             }
-            addLog(`[${pfx}] ${data.markets.length} markets found!`, "ok");
-          }
-        } catch(e) { /* ignore */ }
-        await new Promise(r => setTimeout(r, 150));
+            if ((data.markets || []).length > 0) addLog(`[${s}] ${data.markets.length} markets (mkts endpoint)`, 'ok');
+          } catch (e) { /* ignore */ }
+          await new Promise(r => setTimeout(r, 200));
+        }
       }
 
-      if (found.length) {
-        markets = [...markets, ...found];
-        addLog(`[${cat.toUpperCase()}] ${found.length} markets (sample: ${found[0]?.ticker})`, "ok");
-      } else {
-        addLog(`[${cat.toUpperCase()}] 0 markets — not on Kalshi today or unknown prefix`, "warn");
+      // ── Strategy 3: markets endpoint with event-level prefix guesses ─────────
+      if (found.length === 0) {
+        for (const pfx of eventPrefixes) {
+          try {
+            const kalshiPath3 = `/trade-api/v2/markets?status=open&limit=200&series_ticker=${pfx}`;
+            const url = `/kalshi-api${kalshiPath3}`;
+            const res = await fetch(url, { headers: await kalshiHeaders('GET', kalshiPath3) });
+            if (!res.ok) continue;
+            const data = await res.json();
+            for (const m of (data.markets || [])) {
+              if (!existingTickers.has(m.ticker)) {
+                found.push({ ...m, _forcedCat: cat });
+                existingTickers.add(m.ticker);
+              }
+            }
+            if ((data.markets || []).length > 0) { addLog(`[${pfx}] ${data.markets.length} markets (prefix fallback)`, 'ok'); break; }
+          } catch (e) { /* ignore */ }
+          await new Promise(r => setTimeout(r, 150));
+        }
       }
-      await new Promise(r => setTimeout(r, 350));
+
+      if (found.length > 0) {
+        markets = [...markets, ...found];
+        addLog(`[${cat.toUpperCase()}] ✓ ${found.length} markets (sample: ${found[0]?.ticker})`, 'ok');
+      } else {
+        addLog(`[${cat.toUpperCase()}] 0 markets found — not on Kalshi today`, 'warn');
+      }
+      await new Promise(r => setTimeout(r, 300));
     }
 
     addLog(`[KALSHI] Fetched ${markets.length} raw sports markets.`, "ok");
@@ -676,7 +799,7 @@ export default function App() {
     setProgress(20);
 
     // Filter: live games only (close_time within next 6h OR already past but within 2h), with volume
-    let debugReject = { combo: 0, prop_ticker: 0, prop_title: 0, not_live: 0, no_volume: 0, empty_book: 0, passed: 0 };
+    let debugReject = { combo: 0, prop_ticker: 0, prop_title: 0, expired: 0, futures: 0, not_live: 0, no_volume: 0, empty_book: 0, passed: 0 };
     const now = Date.now();
     const sportsMarkets = markets.filter(m => {
       const ticker = (m.ticker || "").toUpperCase();
@@ -687,6 +810,9 @@ export default function App() {
       // Exclude spreads, totals, player props
       if (/SPREAD|NBAPTS|NBAREB|NBAAST|NBASTL|NBABLK|NBA3PM|NBATOTAL|NHLTOTAL|NFLTOTAL/i.test(ticker)) { debugReject.prop_ticker++; return false; }
       if (/points|rebounds|assists|yards|goals|touchdowns|shots|over\b|under\b|spread|margin|\bby\b/i.test(title)) { debugReject.prop_title++; return false; }
+      // Exclude already-settled or expired markets (result is set when Kalshi has resolved the market)
+      if (m.result && m.result !== '') { debugReject.expired++; return false; }
+      if (m.status && /expired|settled|finalized|closed/i.test(m.status)) { debugReject.expired++; return false; }
       // LIVE ONLY: parse game date from ticker e.g. KXNBAGAME-26MAR05LALDEN-LAL → 26MAR05 → Mar 5 2026
       // Kalshi close_time is settlement deadline (2 weeks out), useless for game date — use ticker instead
       const dateMatch = ticker.match(/-(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d{2})/i);
@@ -696,16 +822,26 @@ export default function App() {
         const gameDate = new Date(Date.UTC(2000 + parseInt(dateMatch[1]), monthMap[dateMatch[2].toUpperCase()], parseInt(dateMatch[3])));
         const todayUTC = new Date(now);
         const todayStart = Date.UTC(todayUTC.getUTCFullYear(), todayUTC.getUTCMonth(), todayUTC.getUTCDate());
-        // Accept: up to 3 days ago (tennis matches can span days), today, and tomorrow
-        isRelevant = gameDate.getTime() >= todayStart - 3*24*60*60*1000 && gameDate.getTime() < todayStart + 2*24*60*60*1000;
+        // Accept: up to 3 days ago (tennis matches can span days), today, and next 3 days
+        isRelevant = gameDate.getTime() >= todayStart - 3*24*60*60*1000 && gameDate.getTime() < todayStart + 3*24*60*60*1000;
+      } else {
+        // No date in ticker — only include if close_time is in the future AND within 30 days.
+        // This rejects season-long futures (close_time: 2028) and already-closed markets.
+        const closeMs = m.close_time ? new Date(m.close_time).getTime() : null;
+        if (!closeMs || closeMs <= now - 2*60*60*1000) { debugReject.expired++; return false; }
+        if (closeMs > now + 30*24*60*60*1000) { debugReject.futures++; return false; }
+        isRelevant = true;
       }
       if (!isRelevant) { debugReject.not_live++; return false; }
-      // Must have real trading volume
-      if (!m.volume_24h || m.volume_24h < 1) { debugReject.no_volume++; return false; }
-      // Must have active orderbook
+      // Volume check: skip only if truly dead (no volume AND empty book)
+      // Some freshly opened markets have 0 volume_24h but valid bids/asks
       const bid  = m.yes_bid   != null ? m.yes_bid   : 0;
       const ask  = m.yes_ask   != null ? m.yes_ask   : 100;
       const last = m.last_price != null ? m.last_price : 0;
+      const hasVolume = m.volume_24h > 0 || m.volume > 0;
+      const hasBook = !(bid === 0 && ask >= 99 && last === 0);
+      if (!hasVolume && !hasBook) { debugReject.no_volume++; return false; }
+      // Must have active orderbook
       if (bid === 0 && ask >= 99 && last === 0) { debugReject.empty_book++; return false; }
 
       debugReject.passed++;
@@ -869,7 +1005,7 @@ export default function App() {
     scanRef.current = false;
     setScanning(false);
     setTimeout(() => setProgress(0), 2000);
-  }, [apiKey, addLog]);
+  }, [apiKey, kalshiKeyOk, kalshiHeaders, addLog]);
 
   useEffect(() => {
     if (autoRef.current) clearInterval(autoRef.current);
@@ -897,9 +1033,9 @@ export default function App() {
       const daysDiff = (gMs - nowMs) / (1000 * 60 * 60 * 24);
       let passes;
       if (timeWindow === -1) {
-        passes = daysDiff >= -1 && daysDiff <= 1;
+        passes = daysDiff >= -1.2 && daysDiff <= 0.5;
       } else {
-        passes = daysDiff >= -1 && daysDiff <= (timeWindow / 24) + 1;
+        passes = daysDiff >= -1.2 && daysDiff <= (timeWindow / 24) + 1;
       }
       if (passes) { passed++; } else { failTime++; }
       if (samples.length < 5) samples.push({ ticker: r.ticker.slice(-16), days: daysDiff.toFixed(2), passes });
@@ -911,21 +1047,19 @@ export default function App() {
     if (!activeCats.includes(r.cat)) return false;
     if (timeWindow === 0) return true;
 
-    // Always use tickerDateMs — close_time is the settlement deadline (weeks out), not game time
-    const gameMs = r.tickerDateMs || null;
-    if (!gameMs) return false;
+    // Use tickerDateMs (game day) as primary; fall back to close_time for undated tickers
+    const gameMs = r.tickerDateMs || (r.closeTime ? new Date(r.closeTime).getTime() : null);
+    if (!gameMs) return false; // no timing info — hide when filter is active
+
+    const daysDiff = (gameMs - nowMs) / (1000 * 60 * 60 * 24);
 
     if (timeWindow === -1) {
-      // LIVE NOW: game is happening today (within ±1 calendar day of now)
-      const gameDayStart = gameMs; // tickerDateMs = midnight UTC of game day
-      const daysDiff = (gameDayStart - nowMs) / (1000 * 60 * 60 * 24);
-      return daysDiff >= -1 && daysDiff <= 1;
+      // LIVE NOW: ticker date is today or within 28.8h back — excludes yesterday's finished games
+      return daysDiff >= -1.2 && daysDiff <= 0.5;
     }
 
-    // NEXT Xh: game day is today or within the window
-    const gameDayStart = gameMs;
-    const daysDiff = (gameDayStart - nowMs) / (1000 * 60 * 60 * 24);
-    return daysDiff >= -1 && daysDiff <= (timeWindow / 24) + 1;
+    // NEXT Xh window
+    return daysDiff >= -1.2 && daysDiff <= (timeWindow / 24) + 1;
   });
   const hotRows = visibleRows.filter(r => r.scanState === "done" && (r.play === "YES" || r.play === "NO"));
 
@@ -951,6 +1085,25 @@ export default function App() {
             <span className="ts">EDGE <b className="g">{stats.underpriced}</b></span>
             <span className="ts" style={{ color: "var(--text-dim)" }}>{time.toLocaleTimeString()}</span>
           </div>
+        </div>
+
+        <div className="auth-bar">
+          {kalshiKeyOk ? (
+            <>
+              <span className="auth-connected">✓ KALSHI KEY LOADED</span>
+              <button className="auth-logout" onClick={logoutKalshi}>clear</button>
+            </>
+          ) : (
+            <>
+              <span className="auth-label">KALSHI API KEY</span>
+              <input className="auth-input" placeholder="Key ID (from kalshi.com/profile)"
+                value={kalshiKeyId} onChange={e => setKalshiKeyId(e.target.value)} />
+              <textarea className="auth-pem" placeholder={"-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"}
+                value={kalshiPem} onChange={e => setKalshiPem(e.target.value)} />
+              <button className="auth-btn" onClick={loadKalshiKey}>LOAD</button>
+              {kalshiErr && <span className="auth-err">{kalshiErr}</span>}
+            </>
+          )}
         </div>
 
         <div className="controls">
@@ -1211,7 +1364,7 @@ export default function App() {
               )}
               {filterDebug?.samples?.length > 0 && (
                 <span style={{fontSize:9, color:'var(--text-dim)'}}>
-                  SAMPLES: {filterDebug.samples.map(s => `${s.ticker}(${s.mins}min ${s.passes?'✓':'✗'})`).join(' | ')}
+                  SAMPLES: {filterDebug.samples.map(s => `${s.ticker}(${s.days}d ${s.passes?'✓':'✗'})`).join(' | ')}
                 </span>
               )}
               <button onClick={() => setDebugLog([])} style={{marginLeft:'auto', fontSize:9, background:'none', border:'1px solid var(--border)', color:'var(--text-dim)', cursor:'pointer', padding:'2px 8px'}}>CLEAR</button>
